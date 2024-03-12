@@ -25,3 +25,9 @@ Run `python find_hidden_gems.py`. This will populate the playlists created in th
 
 ## Listen to Playlists
 Once you've generated the playlists, listen to them and like songs from them. Once you've listened to all of the playlists, wash, rinse, and repeat. Check out `track_scores.csv` to see which of your top tracks yielded the most likes. 
+
+## Look at Scores
+Check out `track_scores.csv` to see which seed tracks gave you the most liked songs. Don't edit this file manually! The code needs it to keep track of scores. 
+
+# What to do next? 
+Get recommendations based on artists as well as tracks

@@ -8,8 +8,6 @@ from spotipy.oauth2 import SpotifyOAuth
 from itertools import compress
 from settings import Config
 
-# TODO right now sample is just getting track IDs, but we also need names/artists for the playlist description
-
 logging.basicConfig(level=logging.INFO)
 
 sp = spotipy.Spotify(auth_manager=SpotifyOAuth(scope=Config.REQUIRED_SCOPE))
