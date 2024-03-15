@@ -12,78 +12,65 @@ logging.basicConfig(level=logging.INFO)
 
 sp = spotipy.Spotify(auth_manager=SpotifyOAuth(scope=Config.REQUIRED_SCOPE))
 
-def find_hidden_gems(*, sample_size, target_popularity, max_popularity):
-    # Get top tracks from user's library
-    top_tracks = get_top_tracks()
-    logging.info(f'Found {len(top_tracks)} top tracks to sample from')
-
-    # Load target playlists
-    with open('target_playlists.json', 'r') as file:
-        target_playlists = json.load(file)
-    file.close()
-
-    # Score existing playlist before updating
-    score_existing_playlists(target_playlists)
-
-    # Create new playlists from randomly sampled seed tracks
-    for i in range(len(target_playlists)):
-        logging.info(f'On playlist {i+1}')
-        sample_indices = random.sample(range(len(top_tracks)), sample_size)
-        sample = [top_tracks[i] for i in sample_indices]
-        recs = get_recommendations(sample, target_popularity=target_popularity, max_popularity=max_popularity)
-        make_playlist_from_recs(recs, sample, target_playlists[i])
-        update_seed_tracks(sample, target_playlists[i])
-
-    # Write new target playlist info
-    with open('target_playlists.json', 'w') as file:
-        json.dump(target_playlists, file)
-    file.close()
-
-def get_top_tracks():
-    response = sp.current_user_top_tracks(limit=50, time_range=Config.TIME_RANGE)
-    top_tracks = response['items']
-    while len(top_tracks) < response['total']:
-        more_top_tracks = sp.current_user_top_tracks(limit=50, time_range=Config.TIME_RANGE, offset=len(top_tracks))['items']
-        top_tracks += more_top_tracks
-    return top_tracks    
-
-def score_existing_playlists(target_playlists):
-    # Check each playlist for liked tracks
-    for i in range(len(target_playlists)):   
-        num_liked_tracks = get_num_liked_tracks(target_playlists[i]['id'])
-        add_score_to_tracks(target_playlists[i]['seed_tracks'], num_liked_tracks)
-        
-def get_num_liked_tracks(playlist_id):
-    playlist = sp.playlist(playlist_id)
-    track_ids = [track['track']['id'] for track in playlist['tracks']['items']]
-    if len(track_ids) > 0: # Necessary to avoid error when playlist is empty on first execution
-        num_liked_tracks = sum(sp.current_user_saved_tracks_contains(track_ids))
+def find_hidden_gems(*, sample_type, time_range, i):
+    logging.info(f'creating playlist from top {sample_type}s in {time_range.replace('_', ' ')} range')
+    # Get top entities from user
+    if sample_type == 'track': 
+        f = sp.current_user_top_tracks
+    elif sample_type == 'artist': 
+        f = sp.current_user_top_artists
     else:
-        return 0
-    return num_liked_tracks    
+        raise ValueError(f'Invalid sample type {sample_type}')
+    response = f(limit=50, time_range=time_range)
+    total = response['total']
+    top_entities = response['items']
+    while len(top_entities) < total:
+        logging.info(f'paginating...')
+        logging.info(f'len(top_entities): {len(top_entities)}')
+        more_top_entities = f(limit=50, time_range=time_range, offset=len(top_entities))['items']
+        top_entities += more_top_entities
 
-def add_score_to_tracks(seed_tracks, score):
-    if not os.path.exists('track_scores.csv'):
-        with open('track_scores.csv', 'w+') as file:
-            file.write('track_id,track_name,artist,liked_songs_yielded,times_served\n')
+    # Randomly sample from top entities
+    sample_indices = random.sample(range(len(top_entities)), Config.SAMPLE_SIZE)
+    sample_entities = [top_entities[i] for i in sample_indices]
+
+    # Get recommendations from sampled entities, keeping track of which 
+    # entity yielded each recommendation
+    recs = {}
+    #attributions = {}
+    #recs = [] 
+    for entity in sample_entities:
+        entity_recs = get_recommendations(entity, sample_type, Config.RECS_PER_SAMPLE)
+        for rec in entity_recs:
+            recs[rec['uri']] = entity
+        #    attributions[rec['id']] = [entity['id']]
+        #recs.extend(entity_recs)
+
+    # Create new playlist from recommendations
+    new_playlist_info = create_seeded_playlist(list(recs.keys()), sample_entities, sample_type, i)
+
+    # Record recommendation attributions for playlist
+    if not os.path.exists('attributions.json'):
+        with open('attributions.json', 'w+') as file:
+            file.write('[]')
             file.close()
-    score_df = pd.read_csv('track_scores.csv')
-    for track in seed_tracks:
-        if track['id'] in score_df.track_id:
-            score_df.loc[score_df.track_id==track['id']]['liked_songs_yielded'] += score
-            score_df.loc[score_df.track_id==track['id']]['times_served'] += 1
-        else:
-            new_row = pd.DataFrame.from_dict({'track_id': [track['id']], 'track_name': [track['name']], 'artist': [track['artist']], 'liked_songs_yielded': [score], 'times_served': [1]})
-            score_df = pd.concat([score_df, new_row])
-    score_df.to_csv('track_scores.csv', index=False)
+    contents = json.load(open('attributions.json', 'r'))
+    contents.append(recs)
+    with open('attributions.json', 'w+') as file:
+        file.write(json.dumps(contents))
 
-def get_recommendations(seed_tracks, target_popularity, max_popularity):
-    logging.info(f'getting recommendations from seed tracks {[track['name'] for track in seed_tracks]}')
+    return new_playlist_info
+
+def get_recommendations(sample, sample_type, recs_per_sample):
+    kwargs = {'target_popularity': Config.TARGET_POPULARITY, 'max_popularity': Config.MAX_POPULARITY} 
+    if sample_type == 'track':
+        kwargs['seed_tracks'] = [sample['id']] 
+    elif sample_type == 'artist':
+        kwargs['seed_artists'] = [sample['id']] 
     recs = []
-    while len(recs) < 20:
-        response = sp.recommendations(seed_tracks=[track['id'] for track in seed_tracks], target_popularity=target_popularity, max_popularity=max_popularity)
+    while len(recs) < recs_per_sample:
+        response = sp.recommendations(**kwargs)
         recommended_tracks = response['tracks']
-        logging.info(f'got recommendations {[[track['name'], track['artists'][0]['name']] for track in recommended_tracks]}')
         recommended_track_ids = [track['id'] for track in recommended_tracks]
         is_already_liked = sp.current_user_saved_tracks_contains(recommended_track_ids)
         is_new = [not liked for liked in is_already_liked]
@@ -91,25 +78,130 @@ def get_recommendations(seed_tracks, target_popularity, max_popularity):
         if len(already_liked_tracks) > 0: 
             logging.info(f'removing already liked songs {[track['name'] for track in already_liked_tracks]}')
         recs += list(compress(recommended_tracks, is_new))
-    recs = recs[:20]
+    recs = recs[:recs_per_sample]
     return recs
 
-def make_playlist_from_recs(recs, seed_tracks, playlist):
-    # Remove all tracks from playlist and add recs
-    sp.playlist_replace_items(playlist['id'], [track['id'] for track in recs])
-    track_names = [track['name'] for track in seed_tracks]
-    track_artists = [[artist['name'] for artist in track['artists']] for track in seed_tracks]
-    track_artists = [', '.join(artists) for artists in track_artists]
-    track_info = [f'{track_names[i]} by {track_artists[i]}' for i in range(len(track_names))]
-    new_description = f'Playlist created from seed tracks {" - ".join([track for track in track_info])}'
-    sp.playlist_change_details(playlist['id'], description=new_description)
+def create_seeded_playlist(track_uris, seed_entities, sample_type, i):
+    name = f'Hidden Gems - #{i}'
 
-def update_seed_tracks(seed_tracks, playlist):
-    seed_track_records = []
-    for track in seed_tracks:
-        artists = ', '.join([artist['name'] for artist in track['artists']])
-        seed_track_records.append({'id': track['id'], 'name': track['name'], 'artist': artists})
-    playlist['seed_tracks'] = seed_track_records
+    # Create description
+    if sample_type == 'track':
+        seed_names = [track['name'] for track in seed_entities]
+        seed_artists = [[artist['name'] for artist in track['artists']] for track in seed_entities]
+        seed_artists = [', '.join(artists) for artists in seed_artists]
+        seed_info = [f'{seed_names[i]} by {seed_artists[i]}' for i in range(len(seed_names))]
+        description = f'Playlist created from seed tracks {" - ".join([track for track in seed_info])}'
+    elif sample_type == 'artist': 
+        seed_names = [artist['name'] for artist in seed_entities]
+        description = f'Playlist created from seed artists {", ".join([artist for artist in seed_names])}'
+
+    new_playlist_info = sp.user_playlist_create(sp.me()['id'], name, public=False, description=description)
+
+    # Add tracks to playlist
+    sp.playlist_add_items(new_playlist_info['id'], track_uris)
+
+    return new_playlist_info
+
+def score_old_playlists():
+    attributions = json.load(open('attributions.json', 'r'))
+
+    recs = list(attributions.keys())
+    is_liked_rec = sp.current_user_saved_tracks_contains(recs)
+    liked_recs = list(compress(recs, is_liked_rec))
+    logging.info(f'liked_recs: {liked_recs}')
+    add_score_to_seeds(liked_recs, attributions)
+    """
+    # Separate attributions into those by track and those by artist
+    track_attributions = []
+    artist_attributions = []
+    for rec, seed in attributions.items():
+        if seed['type'] == 'track': 
+            track_attributions.append({rec: seed})
+        elif seed['type'] == 'artist': 
+            artist_attributions.append({rec: seed})
+        else:
+            logging.error(f'Unexpected seed type: {seed["type"]}')
+    
+    # Add score to track seeds
+    song_seeded_recs = list(track_attributions.keys())
+    is_liked_rec = sp.current_user_saved_tracks_contains(song_seeded_recs)
+    liked_recs = list(compress(song_seeded_recs, is_liked_rec))
+    add_score_to_track_seeds(liked_recs, track_attributions)
+
+    # Add score to artist seeds
+
+
+    # Check each playlist for liked tracks
+    for i in range(len(target_playlists)):   
+        num_liked_tracks = get_num_liked_tracks(target_playlists[i]['id'])
+        add_score_to_tracks(target_playlists[i]['seed_tracks'], num_liked_tracks)
+    """
+
+def add_score_to_seeds(liked_recs, attributions):
+    track_attributions = []
+    artist_attributions = []
+
+    # Sort attributions
+    for liked_rec in attributions:
+        if attributions[liked_rec]['type'] == 'track':
+            track_attributions.append({liked_rec: attributions[liked_rec]})
+        elif attributions[liked_rec]['type'] == 'artist':
+            artist_attributions.append({liked_rec: attributions[liked_rec]})
+        else:
+            logging.error(f'Unexpected seed type: {attributions[liked_rec]["type"]}')
+    
+    # Add score to track seeds
+    if not os.path.exists('track_seed_scores.csv'):
+        track_score_df = pd.DataFrame(columns=['track_id', 'track_name', 'artist', 'liked_songs_yielded', 'times_served'])
+    else:
+        track_score_df = pd.read_csv('track_seed_scores.csv')
+    for seed_track in list(track_attributions.values()):
+        logging.info(f'seed track {seed_track["name"]} getting +1')
+        if seed_track in track_score_df.track_id:
+            track_score_df.loc[track_score_df.track_id==seed_track]['liked_songs_yielded'] += 1
+            track_score_df.loc[track_score_df.track_id==seed_track]['times_served'] += 1
+        else:
+            new_row = pd.DataFrame.from_dict({'track_id': [seed_track['id']], 'track_name': [seed_track['name']], 'artist': [seed_track['artist']], 'liked_songs_yielded': [1], 'times_served': [1]})
+            track_score_df = pd.concat([track_score_df, new_row])
+    track_score_df.to_csv('track_seed_scores.csv', index=False)
+
+    # Add score to artist seeds
+    if not os.path.exists('artist_seed_scores.csv'):
+        artist_score_df = pd.DataFrame(columns=['artist_id', 'artist_name', 'liked_songs_yielded', 'times_served'])
+    else:
+        artist_score_df = pd.read_csv('artist_seed_scores.csv')
+    for seed_artist in list(artist_attributions.values()):
+        logging.info(f'seed artist {seed_artist["name"]} getting +1')
+        if seed_artist in artist_score_df.artist_id:
+            artist_score_df.loc[artist_score_df.artist_id==seed_artist]['liked_songs_yielded'] += 1
+            artist_score_df.loc[artist_score_df.artist_id==seed_artist]['times_served'] += 1
+        else:
+            new_row = pd.DataFrame.from_dict({'artist_id': [seed_artist['id']], 'artist_name': [seed_artist['name']], 'liked_songs_yielded': [1], 'times_served': [1]})
+            artist_score_df = pd.concat([artist_score_df, new_row])
+
+def remove_old_playlists():
+    try:
+        with open('playlist_info.json', 'r') as file:
+            playlists = json.load(file)
+            for playlist in playlists:
+                logging.info(f'deleting playlist {playlist["id "]}')
+                sp.user_playlist_unfollow(sp.me()['id'], playlist['id'])
+            file.close()
+    except Exception as err:
+        logging.warning(f'failed to delete old playlists :: {err}')
 
 if __name__ == '__main__':
-    find_hidden_gems(sample_size=Config.SAMPLE_SIZE, target_popularity=Config.TARGET_POPULARITY, max_popularity=Config.MAX_POPULARITY)
+    score_old_playlists()
+    remove_old_playlists()
+
+    new_playlists = []
+    i = 1
+    for seed_type in Config.SEED_TYPES:
+        for time_range in Config.TIME_RANGES:
+            new_playlist_info = find_hidden_gems(sample_type=seed_type, time_range=time_range, i=i)
+            new_playlists.append(new_playlist_info)
+            i += 1
+    
+    with open('playlist_info.json', 'w+') as file:
+        file.write(json.dumps(new_playlists))
+        file.close()

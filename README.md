@@ -31,3 +31,6 @@ Check out `track_scores.csv` to see which seed tracks gave you the most liked so
 
 # What to do next? 
 Get recommendations based on artists as well as tracks
+
+# Limitations
+If the hidden gem playlists have more than 100 tracks (if `SAMPLE_SIZE*RECS_PER_SAMPLE>100` in `settings.py`), this will break - the API call to add tracks to a playlist accespts a maximum of 100 tracks, and I haven't paginated that properly. 
