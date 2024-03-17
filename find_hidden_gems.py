@@ -25,14 +25,14 @@ def find_hidden_gems(*, sample_type, time_range, i):
     total = response['total']
     top_entities = response['items']
     while len(top_entities) < total:
-        logging.info(f'paginating...')
-        logging.info(f'len(top_entities): {len(top_entities)}')
         more_top_entities = f(limit=50, time_range=time_range, offset=len(top_entities))['items']
         top_entities += more_top_entities
 
+    logging.info(f'sampling from {total} {sample_type}s')
     # Randomly sample from top entities
     sample_indices = random.sample(range(len(top_entities)), Config.SAMPLE_SIZE)
     sample_entities = [top_entities[i] for i in sample_indices]
+    logging.info(f'sample_entities: {[s["name"] for s in sample_entities]}')
 
     # Get recommendations from sampled entities, keeping track of which 
     # entity yielded each recommendation
@@ -41,6 +41,7 @@ def find_hidden_gems(*, sample_type, time_range, i):
     #recs = [] 
     for entity in sample_entities:
         entity_recs = get_recommendations(entity, sample_type, Config.RECS_PER_SAMPLE)
+        logging.info(f'recommendations for seed {entity["name"]}: {[(rec["name"], rec["popularity"]) for rec in entity_recs]}')
         for rec in entity_recs:
             recs[rec['uri']] = entity
         #    attributions[rec['id']] = [entity['id']]
@@ -52,10 +53,10 @@ def find_hidden_gems(*, sample_type, time_range, i):
     # Record recommendation attributions for playlist
     if not os.path.exists('attributions.json'):
         with open('attributions.json', 'w+') as file:
-            file.write('[]')
+            file.write('{}')
             file.close()
     contents = json.load(open('attributions.json', 'r'))
-    contents.append(recs)
+    contents.update(recs)
     with open('attributions.json', 'w+') as file:
         file.write(json.dumps(contents))
 
@@ -103,13 +104,20 @@ def create_seeded_playlist(track_uris, seed_entities, sample_type, i):
     return new_playlist_info
 
 def score_old_playlists():
-    attributions = json.load(open('attributions.json', 'r'))
-
+    try:
+        attributions = json.load(open('attributions.json', 'r'))
+    except FileNotFoundError:
+        logging.warning(f'No attribution file found - skipping scoring')
+        return
     recs = list(attributions.keys())
-    is_liked_rec = sp.current_user_saved_tracks_contains(recs)
-    liked_recs = list(compress(recs, is_liked_rec))
-    logging.info(f'liked_recs: {liked_recs}')
-    add_score_to_seeds(liked_recs, attributions)
+    chunked_recs = [recs[i:i+50] for i in range(0, len(recs), 50)]
+    liked_recs = []
+    for chunk in chunked_recs:
+        logging.info(f'checking recs {chunk}')
+        is_liked_rec = sp.current_user_saved_tracks_contains(chunk)
+        liked_recs.extend(list(compress(chunk, is_liked_rec)))
+        logging.info(f'liked_recs: {liked_recs}')
+        add_score_to_seeds(liked_recs, attributions)
     """
     # Separate attributions into those by track and those by artist
     track_attributions = []
@@ -138,15 +146,18 @@ def score_old_playlists():
     """
 
 def add_score_to_seeds(liked_recs, attributions):
-    track_attributions = []
-    artist_attributions = []
+    # Todo: 
+    # - sum up number of liked recs for each seed, including 0s
+    # - add number of liked recs to score for each seed
+    track_attributions = {}
+    artist_attributions = {}
 
-    # Sort attributions
-    for liked_rec in attributions:
+    # Sort attributions by seed type
+    for liked_rec in liked_recs:
         if attributions[liked_rec]['type'] == 'track':
-            track_attributions.append({liked_rec: attributions[liked_rec]})
+            track_attributions.update({liked_rec: attributions[liked_rec]})
         elif attributions[liked_rec]['type'] == 'artist':
-            artist_attributions.append({liked_rec: attributions[liked_rec]})
+            artist_attributions.update({liked_rec: attributions[liked_rec]})
         else:
             logging.error(f'Unexpected seed type: {attributions[liked_rec]["type"]}')
     
@@ -157,7 +168,7 @@ def add_score_to_seeds(liked_recs, attributions):
         track_score_df = pd.read_csv('track_seed_scores.csv')
     for seed_track in list(track_attributions.values()):
         logging.info(f'seed track {seed_track["name"]} getting +1')
-        if seed_track in track_score_df.track_id:
+        if seed_track['id'] in track_score_df.track_id:
             track_score_df.loc[track_score_df.track_id==seed_track]['liked_songs_yielded'] += 1
             track_score_df.loc[track_score_df.track_id==seed_track]['times_served'] += 1
         else:
@@ -172,12 +183,17 @@ def add_score_to_seeds(liked_recs, attributions):
         artist_score_df = pd.read_csv('artist_seed_scores.csv')
     for seed_artist in list(artist_attributions.values()):
         logging.info(f'seed artist {seed_artist["name"]} getting +1')
-        if seed_artist in artist_score_df.artist_id:
+        if seed_artist['id'] in artist_score_df.artist_id:
             artist_score_df.loc[artist_score_df.artist_id==seed_artist]['liked_songs_yielded'] += 1
             artist_score_df.loc[artist_score_df.artist_id==seed_artist]['times_served'] += 1
         else:
             new_row = pd.DataFrame.from_dict({'artist_id': [seed_artist['id']], 'artist_name': [seed_artist['name']], 'liked_songs_yielded': [1], 'times_served': [1]})
             artist_score_df = pd.concat([artist_score_df, new_row])
+
+def cleanup():
+    remove_old_playlists
+    if os.path.exists('attributions.json'):
+        os.remove('attributions.json')
 
 def remove_old_playlists():
     try:
@@ -192,7 +208,7 @@ def remove_old_playlists():
 
 if __name__ == '__main__':
     score_old_playlists()
-    remove_old_playlists()
+    cleanup()
 
     new_playlists = []
     i = 1
