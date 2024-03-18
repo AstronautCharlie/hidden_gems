@@ -34,3 +34,8 @@ Get recommendations based on artists as well as tracks
 
 # Limitations
 If the hidden gem playlists have more than 100 tracks (if `SAMPLE_SIZE*RECS_PER_SAMPLE>100` in `settings.py`), this will break - the API call to add tracks to a playlist accespts a maximum of 100 tracks, and I haven't paginated that properly. 
+
+# ToDo
+- ID is getting repeated in score csv files - fix this
+- Remove duplications from recommendations list so you don't get recommended the same song more than once by one seed 
+- Keep track of which songs you've been recommended and not liked in the past so that you don't get served the same song on subsequent playlists

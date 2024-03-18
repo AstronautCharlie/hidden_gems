@@ -113,7 +113,6 @@ def score_old_playlists():
     chunked_recs = [recs[i:i+50] for i in range(0, len(recs), 50)]
     liked_recs = []
     for chunk in chunked_recs:
-        logging.info(f'checking recs {chunk}')
         is_liked_rec = sp.current_user_saved_tracks_contains(chunk)
         liked_recs.extend(list(compress(chunk, is_liked_rec)))
         logging.info(f'liked_recs: {liked_recs}')
@@ -149,30 +148,42 @@ def add_score_to_seeds(liked_recs, attributions):
     # Todo: 
     # - sum up number of liked recs for each seed, including 0s
     # - add number of liked recs to score for each seed
-    track_attributions = {}
-    artist_attributions = {}
+    #track_attributions = {}
+    #artist_attributions = {}
+    track_attributions = dict((track['id'], 0) for track in list(attributions.values()) if track['type'] == 'track')
+    artist_attributions = dict((artist['id'], 0) for artist in list(attributions.values()) if artist['type'] == 'artist')
 
     # Sort attributions by seed type
     for liked_rec in liked_recs:
         if attributions[liked_rec]['type'] == 'track':
-            track_attributions.update({liked_rec: attributions[liked_rec]})
+            track_attributions[attributions[liked_rec]['id']] += 1
         elif attributions[liked_rec]['type'] == 'artist':
-            artist_attributions.update({liked_rec: attributions[liked_rec]})
+            artist_attributions[attributions[liked_rec]['id']] += 1
         else:
             logging.error(f'Unexpected seed type: {attributions[liked_rec]["type"]}')
+
+        # if attributions[liked_rec]['type'] == 'track':
+        #     track_attributions.update({liked_rec: attributions[liked_rec]})
+        # elif attributions[liked_rec]['type'] == 'artist':
+        #     artist_attributions.update({liked_rec: attributions[liked_rec]})
+        # else:
+        #     logging.error(f'Unexpected seed type: {attributions[liked_rec]["type"]}')
     
     # Add score to track seeds
     if not os.path.exists('track_seed_scores.csv'):
         track_score_df = pd.DataFrame(columns=['track_id', 'track_name', 'artist', 'liked_songs_yielded', 'times_served'])
     else:
         track_score_df = pd.read_csv('track_seed_scores.csv')
-    for seed_track in list(track_attributions.values()):
-        logging.info(f'seed track {seed_track["name"]} getting +1')
-        if seed_track['id'] in track_score_df.track_id:
-            track_score_df.loc[track_score_df.track_id==seed_track]['liked_songs_yielded'] += 1
-            track_score_df.loc[track_score_df.track_id==seed_track]['times_served'] += 1
+    #for seed_track in list(track_attributions.values()):
+    seed_track_info = dict((track['id'], track) for track in attributions.values() if track['type'] == 'track')
+    for seed_track_id in seed_track_info.keys():
+        logging.info(f'seed track {seed_track_info[seed_track_id]["name"]} getting +{track_attributions[seed_track_id]}')
+        if seed_track_id in track_score_df.track_id:
+            track_score_df.loc[track_score_df.track_id==seed_track_id]['liked_songs_yielded'] += track_attributions[seed_track_id]
+            track_score_df.loc[track_score_df.track_id==seed_track_id]['times_served'] += 1
         else:
-            new_row = pd.DataFrame.from_dict({'track_id': [seed_track['id']], 'track_name': [seed_track['name']], 'artist': [seed_track['artist']], 'liked_songs_yielded': [1], 'times_served': [1]})
+            artists = ', '.join([artist['name'] for artist in seed_track_info[seed_track_id]['artists']])
+            new_row = pd.DataFrame.from_dict({'track_id': [seed_track_id], 'track_name': [seed_track_info[seed_track_id]['name']], 'artist': [artists], 'liked_songs_yielded': [track_attributions[seed_track_id]], 'times_served': [1]})
             track_score_df = pd.concat([track_score_df, new_row])
     track_score_df.to_csv('track_seed_scores.csv', index=False)
 
@@ -181,17 +192,19 @@ def add_score_to_seeds(liked_recs, attributions):
         artist_score_df = pd.DataFrame(columns=['artist_id', 'artist_name', 'liked_songs_yielded', 'times_served'])
     else:
         artist_score_df = pd.read_csv('artist_seed_scores.csv')
-    for seed_artist in list(artist_attributions.values()):
-        logging.info(f'seed artist {seed_artist["name"]} getting +1')
-        if seed_artist['id'] in artist_score_df.artist_id:
-            artist_score_df.loc[artist_score_df.artist_id==seed_artist]['liked_songs_yielded'] += 1
-            artist_score_df.loc[artist_score_df.artist_id==seed_artist]['times_served'] += 1
+    seed_artist_info = dict((artist['id'], artist) for artist in attributions.values() if artist['type'] == 'artist')
+    for seed_artist_id in seed_artist_info.keys():
+        logging.info(f'seed artist {seed_artist_info[seed_artist_id]["name"]} getting +{artist_attributions[seed_artist_id]}')
+        if seed_artist_id in artist_score_df.artist_id:
+            artist_score_df.loc[artist_score_df.artist_id==seed_artist_id]['liked_songs_yielded'] += artist_attributions[seed_artist_id]
+            artist_score_df.loc[artist_score_df.artist_id==seed_artist_id]['times_served'] += 1
         else:
-            new_row = pd.DataFrame.from_dict({'artist_id': [seed_artist['id']], 'artist_name': [seed_artist['name']], 'liked_songs_yielded': [1], 'times_served': [1]})
+            new_row = pd.DataFrame.from_dict({'artist_id': [seed_artist_id], 'artist_name': [seed_artist_info[seed_artist_id]['name']], 'liked_songs_yielded': [artist_attributions[seed_artist_id]], 'times_served': [1]})
             artist_score_df = pd.concat([artist_score_df, new_row])
+    artist_score_df.to_csv('artist_seed_scores.csv', index=False)
 
 def cleanup():
-    remove_old_playlists
+    remove_old_playlists()
     if os.path.exists('attributions.json'):
         os.remove('attributions.json')
 
@@ -200,7 +213,7 @@ def remove_old_playlists():
         with open('playlist_info.json', 'r') as file:
             playlists = json.load(file)
             for playlist in playlists:
-                logging.info(f'deleting playlist {playlist["id "]}')
+                logging.info(f'deleting playlist {playlist["id"]}')
                 sp.user_playlist_unfollow(sp.me()['id'], playlist['id'])
             file.close()
     except Exception as err:
